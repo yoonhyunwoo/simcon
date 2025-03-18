@@ -2,7 +2,7 @@ package main
 
 import (
 	"github.com/urfave/cli/v2"
-	"os"
+	"log"
 )
 
 var createCommand = &cli.Command{
@@ -14,10 +14,18 @@ var createCommand = &cli.Command{
 		if err := checkArgs(context, 2, exactArgs); err != nil {
 			return err
 		}
-		// start Container
-		if err == nil {
-			os.Exit(1)
+
+		status, err := createContainer(context)
+		if err != nil {
+			return err
 		}
+
+		if status == 1 {
+			log.Println(context.Args().First())
+		}
+
+		log.Println(context.Args().First())
+
 		return nil
 	},
 }
