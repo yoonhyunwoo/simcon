@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli/v2"
@@ -49,28 +51,51 @@ func checkArgs(context *cli.Context, expected, checkType int) error {
 func createContainer(context *cli.Context) (int, error) {
 	containerID := context.Args().First()
 	bundlePath := context.Args().Get(1)
-
-	configPath := fmt.Sprintf("/containers/%s/config.json", containerID)
-
+	configPath := filepath.Join(bundlePath, configFile)
 	config, err := loadConfig(configPath)
-
 	if err != nil {
 		return -1, err
 	}
+	//rootfs := filepath.Join(bundlePath, config.Root.Path)
 
-	// 컨테이너 상태 디렉토리 생성
-	containerDir := fmt.Sprintf("/containers/%s", containerID)
+	containerDir := filepath.Join(dataDir, containerID)
 	if err := os.MkdirAll(containerDir, 0755); err != nil {
 		return -1, err
 	}
 
-	rootfs := filepath.Join(bundlePath, config.Root.Path)
+	stateFile := filepath.Join(containerDir, "state.json")
+	_, err = os.Create(stateFile)
+	if err != nil {
+		return -1, err
+	}
 
-	err = pivotRoot(rootfs)
+	pid, err := initContainerProcess(config, containerDir)
+
+	containerState := specs.State{
+		Version: ociVersion,
+		ID:      containerID,
+		Status:  specs.StateCreated,
+		Pid:     pid,
+		Bundle:  bundlePath,
+		Annotations: map[string]string{
+			"created": time.Now().String(),
+			"config":  fmt.Sprintf("%v", config),
+		},
+	}
+
+	sData, err := os.OpenFile(stateFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return -1, err
+	}
+
+	if err := json.NewEncoder(sData).Encode(containerState); err != nil {
+		return -1, err
+	}
 
 	//cgroups 설정
 
 	// Networks 설정
+	return 1, nil
 
 }
 
@@ -117,6 +142,11 @@ func initContainerProcess(config *specs.Spec, containerDir string) (int, error) 
 	return pid, nil
 }
 
+func containerInitProcess(context *cli.Context) error {
+	fmt.Println("conmtainer init process..")
+	return nil
+}
+
 // pivotRoot will call pivot_root such that rootfs becomes the new root
 // filesystem, and everything else is cleaned up.
 func pivotRoot(rootfs string) error {
@@ -161,11 +191,12 @@ func pivotRoot(rootfs string) error {
 	// known to cause issues due to races where we still have a reference to a
 	// mount while a process in the host namespace are trying to operate on
 	// something they think has no mounts (devicemapper in particular).
-	if err := mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
+
+	if err := unix.Mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
 		return err
 	}
 	// Perform the unmount. MNT_DETACH allows us to unmount /proc/self/cwd.
-	if err := unmount(".", unix.MNT_DETACH); err != nil {
+	if err := unix.Unmount(".", unix.MNT_DETACH); err != nil {
 		return err
 	}
 

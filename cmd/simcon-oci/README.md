@@ -4,7 +4,7 @@
   * Mount rootfs
   * Initialize namespaces (PID, NET, etc.) and cgroups
   * Create runtime state directory (/var/lib/simcon/oci/containers/<container-id>/)
-* simcon-oci init
+  * simcon-oci init
 ```
 * ✅ runc init 과정에서 수행하는 주요 작업 순서
   세션 키링(Session Keyring) 설정

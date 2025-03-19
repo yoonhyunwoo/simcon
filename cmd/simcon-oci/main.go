@@ -7,7 +7,9 @@ import (
 )
 
 const (
-	configPath = "config.json"
+	configFile = "config.json"
+	dataDir    = "/var/lib/simcon-oci"
+	ociVersion = "1.0.0"
 )
 
 func main() {
