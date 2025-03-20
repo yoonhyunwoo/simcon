@@ -70,6 +70,10 @@ func createContainer(context *cli.Context) (int, error) {
 	}
 
 	pid, err := initContainerProcess(config, containerDir)
+	configByte, err := json.Marshal(config)
+	if err != nil {
+		return -1, err
+	}
 
 	containerState := specs.State{
 		Version: ociVersion,
@@ -79,7 +83,7 @@ func createContainer(context *cli.Context) (int, error) {
 		Bundle:  bundlePath,
 		Annotations: map[string]string{
 			"created": time.Now().String(),
-			"config":  fmt.Sprintf("%v", config),
+			"config":  fmt.Sprintf("%s", string(configByte)),
 		},
 	}
 
@@ -124,6 +128,7 @@ func initContainerProcess(config *specs.Spec, containerDir string) (int, error) 
 
 	// 실행
 	if err := cmd.Start(); err != nil {
+		fmt.Printf("Error starting init process: %v\n", err)
 		return -1, err
 	}
 
@@ -136,6 +141,7 @@ func initContainerProcess(config *specs.Spec, containerDir string) (int, error) 
 	// pivot_root 설정
 
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		fmt.Printf("Failed to send SIGSTOP signal: %v\n", err)
 		return -1, err
 	}
 
