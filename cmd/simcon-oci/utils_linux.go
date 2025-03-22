@@ -73,14 +73,13 @@ func create(context *cli.Context) (int, error) {
 	if err := setupCgroups(containerState, config); err != nil {
 		return -1, err
 	}
+
 	// TODO: 네트워크 설정
+	// if err := setupNetwork(containerState, config); err != nil {
+	//     return -1, err
+	// }
 
-	stateFile, err := os.OpenFile(stateFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return -1, err
-	}
-
-	if err := json.NewEncoder(stateFile).Encode(containerState); err != nil {
+	if err := writeJSONFile(stateFilePath, containerState); err != nil {
 		return -1, err
 	}
 
@@ -89,17 +88,12 @@ func create(context *cli.Context) (int, error) {
 
 func state(context *cli.Context) (specs.State, error) {
 	containerID := context.Args().First()
-	containerMetadataDir := filepath.Join(dataDir, containerID)
-	stateFilePath := filepath.Join(containerMetadataDir, stateFile)
-	containerState := specs.State{}
+	stateFilePath := filepath.Join(dataDir, containerID, stateFile)
 
-	sData, err := os.Open(stateFilePath)
-	if err != nil {
-		return containerState, err
+	var containerState specs.State
+	if err := readJSONFile(stateFilePath, &containerState); err != nil {
+		return specs.State{}, err
 	}
-	defer sData.Close()
-
-	json.NewDecoder(sData).Decode(&containerState)
 
 	return containerState, nil
 }
@@ -116,10 +110,10 @@ func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	cmd.Stderr = os.Stderr
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS | // Hostname namespace
-			syscall.CLONE_NEWPID | // PID namespace
-			syscall.CLONE_NEWNS | // Mount namespace
-			syscall.CLONE_NEWNET, // Network namespace
+		Cloneflags: syscall.CLONE_NEWUTS |
+			syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWNET,
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -133,7 +127,6 @@ func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	// TODO: overlayFS 초기화
 	// TODO: pivot_root 처리
 
-	// 부모 프로세스가 기다리도록 SIGSTOP 전송
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		fmt.Printf("SIGSTOP 전송 실패: %v\n", err)
 		return -1, err
@@ -148,213 +141,128 @@ func containerInit(context *cli.Context) error {
 	return nil
 }
 
-func setupCgroups(state specs.State, config specs.Spec) error {
-	// cgroup 기본 경로 설정 (상수로 정의되어 있다고 가정)
+func setupCgroups(state specs.State, config *specs.Spec) error {
 	cgroupPath := filepath.Join(cgroupBasePath, state.ID)
 
-	// 디렉토리 생성
 	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
 		return fmt.Errorf("failed to create cgroup directory: %w", err)
 	}
 
-	// 프로세스를 cgroup에 추가
-	if err := os.WriteFile(
-		filepath.Join(cgroupPath, "cgroup.procs"),
-		[]byte(fmt.Sprintf("%d", state.Pid)),
-		0644,
-	); err != nil {
-		return fmt.Errorf("failed to add process to cgroup: %w", err)
+	if err := writeCgroupFile(filepath.Join(cgroupPath, "cgroup.procs"), state.Pid); err != nil {
+		return err
 	}
 
-	// 리소스 제한 설정 부분
-	if config.Linux != nil && config.Linux.Resources != nil {
-		// 1. 메모리 제한 설정
-		if config.Linux.Resources.Memory != nil {
-			// 메모리 제한
-			if config.Linux.Resources.Memory.Limit != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "memory.max"),
-					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Limit)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set memory limit: %w", err)
-				}
-			}
+	if config.Linux == nil || config.Linux.Resources == nil {
+		return nil
+	}
 
-			// 메모리 예약(reservation)
-			if config.Linux.Resources.Memory.Reservation != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "memory.low"),
-					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Reservation)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set memory reservation: %w", err)
-				}
-			}
+	res := config.Linux.Resources
 
-			// 스왑 제한
-			if config.Linux.Resources.Memory.Swap != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "memory.swap.max"),
-					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Swap)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set swap limit: %w", err)
-				}
+	if mem := res.Memory; mem != nil {
+		if mem.Limit != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "memory.max"), *mem.Limit); err != nil {
+				return err
 			}
 		}
-
-		// 2. CPU 제한 설정
-		if config.Linux.Resources.CPU != nil {
-			// CPU 쿼터(quota)
-			if config.Linux.Resources.CPU.Quota != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpu.max"),
-					[]byte(fmt.Sprintf("%d max", *config.Linux.Resources.CPU.Quota)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set CPU quota: %w", err)
-				}
-			}
-
-			// CPU 주기(period)
-			if config.Linux.Resources.CPU.Period != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpu.max"),
-					[]byte(fmt.Sprintf("max %d", *config.Linux.Resources.CPU.Period)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set CPU period: %w", err)
-				}
-			}
-
-			// CPU 쿼터 + 주기를 함께 설정
-			if config.Linux.Resources.CPU.Quota != nil && config.Linux.Resources.CPU.Period != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpu.max"),
-					[]byte(fmt.Sprintf("%d %d", *config.Linux.Resources.CPU.Quota, *config.Linux.Resources.CPU.Period)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set CPU quota and period: %w", err)
-				}
-			}
-
-			// CPU 가중치(weight)
-			if config.Linux.Resources.CPU.Shares != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpu.weight"),
-					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.CPU.Shares)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set CPU weight: %w", err)
-				}
-			}
-
-			// CPU 셋(cpuset) - 특정 CPU에 할당
-			if config.Linux.Resources.CPU.Cpus != "" {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpuset.cpus"),
-					[]byte(config.Linux.Resources.CPU.Cpus),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set CPU set: %w", err)
-				}
-			}
-
-			// 메모리 노드 설정(NUMA)
-			if config.Linux.Resources.CPU.Mems != "" {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "cpuset.mems"),
-					[]byte(config.Linux.Resources.CPU.Mems),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set memory nodes: %w", err)
-				}
+		if mem.Reservation != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "memory.low"), *mem.Reservation); err != nil {
+				return err
 			}
 		}
-
-		// 3. 프로세스 수 제한
-		if config.Linux.Resources.Pids != nil {
-			if err := os.WriteFile(
-				filepath.Join(cgroupPath, "pids.max"),
-				[]byte(fmt.Sprintf("%d", config.Linux.Resources.Pids.Limit)),
-				0644,
-			); err != nil {
-				return fmt.Errorf("failed to set pids limit: %w", err)
-			}
-		}
-
-		// 4. 블록 I/O 제한
-		if config.Linux.Resources.BlockIO != nil {
-			// 가중치 설정
-			if config.Linux.Resources.BlockIO.Weight != nil {
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "io.weight"),
-					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.BlockIO.Weight)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set I/O weight: %w", err)
-				}
-			}
-
-			// 장치별 스로틀링 설정
-			for _, device := range config.Linux.Resources.BlockIO.ThrottleReadBpsDevice {
-				deviceStr := fmt.Sprintf("%d:%d", device.Major, device.Minor)
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "io.max"),
-					[]byte(fmt.Sprintf("%s rbps=%d", deviceStr, device.Rate)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set read BPS throttle: %w", err)
-				}
-			}
-
-			for _, device := range config.Linux.Resources.BlockIO.ThrottleWriteBpsDevice {
-				deviceStr := fmt.Sprintf("%d:%d", device.Major, device.Minor)
-				if err := os.WriteFile(
-					filepath.Join(cgroupPath, "io.max"),
-					[]byte(fmt.Sprintf("%s wbps=%d", deviceStr, device.Rate)),
-					0644,
-				); err != nil {
-					return fmt.Errorf("failed to set write BPS throttle: %w", err)
-				}
-			}
-		}
-
-		// 5. 허거 페이지(Huge Page) 제한
-		for _, limit := range config.Linux.Resources.HugepageLimits {
-			if err := os.WriteFile(
-				filepath.Join(cgroupPath, fmt.Sprintf("hugetlb.%s.max", limit.Pagesize)),
-				[]byte(fmt.Sprintf("%d", limit.Limit)),
-				0644,
-			); err != nil {
-				return fmt.Errorf("failed to set hugepage limit for %s: %w", limit.Pagesize, err)
-			}
-		}
-
-		// 6. 네트워크 우선순위 설정
-		if config.Linux.Resources.Network != nil && config.Linux.Resources.Network.ClassID != nil {
-			if err := os.WriteFile(
-				filepath.Join(cgroupPath, "net_cls.classid"),
-				[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Network.ClassID)),
-				0644,
-			); err != nil {
-				return fmt.Errorf("failed to set network class ID: %w", err)
-			}
-		}
-
-		// 7. Unified cgroup 설정 (cgroup v2 전용)
-		for key, value := range config.Linux.Resources.Unified {
-			if err := os.WriteFile(
-				filepath.Join(cgroupPath, key),
-				[]byte(value),
-				0644,
-			); err != nil {
-				return fmt.Errorf("failed to set unified cgroup parameter %s: %w", key, err)
+		if mem.Swap != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "memory.swap.max"), *mem.Swap); err != nil {
+				return err
 			}
 		}
 	}
 
+	if cpu := res.CPU; cpu != nil {
+		if cpu.Quota != nil && cpu.Period != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpu.max"),
+				fmt.Sprintf("%d %d", *cpu.Quota, *cpu.Period)); err != nil {
+				return err
+			}
+		} else if cpu.Quota != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpu.max"),
+				fmt.Sprintf("%d max", *cpu.Quota)); err != nil {
+				return err
+			}
+		} else if cpu.Period != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpu.max"),
+				fmt.Sprintf("max %d", *cpu.Period)); err != nil {
+				return err
+			}
+		}
+
+		if cpu.Shares != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpu.weight"), *cpu.Shares); err != nil {
+				return err
+			}
+		}
+		if cpu.Cpus != "" {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpuset.cpus"), cpu.Cpus); err != nil {
+				return err
+			}
+		}
+		if cpu.Mems != "" {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "cpuset.mems"), cpu.Mems); err != nil {
+				return err
+			}
+		}
+	}
+
+	if pids := res.Pids; pids != nil {
+		if err := writeCgroupFile(filepath.Join(cgroupPath, "pids.max"), pids.Limit); err != nil {
+			return err
+		}
+	}
+
+	if blkio := res.BlockIO; blkio != nil {
+		if blkio.Weight != nil {
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "io.weight"), *blkio.Weight); err != nil {
+				return err
+			}
+		}
+
+		for _, device := range blkio.ThrottleReadBpsDevice {
+			deviceStr := fmt.Sprintf("%d:%d rbps=%d", device.Major, device.Minor, device.Rate)
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "io.max"), deviceStr); err != nil {
+				return err
+			}
+		}
+
+		for _, device := range blkio.ThrottleWriteBpsDevice {
+			deviceStr := fmt.Sprintf("%d:%d wbps=%d", device.Major, device.Minor, device.Rate)
+			if err := writeCgroupFile(filepath.Join(cgroupPath, "io.max"), deviceStr); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, limit := range res.HugepageLimits {
+		filename := fmt.Sprintf("hugetlb.%s.max", limit.Pagesize)
+		if err := writeCgroupFile(filepath.Join(cgroupPath, filename), limit.Limit); err != nil {
+			return err
+		}
+	}
+
+	if net := res.Network; net != nil && net.ClassID != nil {
+		if err := writeCgroupFile(filepath.Join(cgroupPath, "net_cls.classid"), *net.ClassID); err != nil {
+			return err
+		}
+	}
+
+	for key, value := range res.Unified {
+		if err := writeCgroupFile(filepath.Join(cgroupPath, key), value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupNetwork(state specs.State, config *specs.Spec) error {
+	// 네트워크 설정은 향후 구현 예정
 	return nil
 }
 
@@ -384,17 +292,14 @@ func pivotRootfs(newRootfs string) error {
 		return &os.PathError{Op: "fchdir", Path: strconv.Itoa(oldRootFD), Err: err}
 	}
 
-	// 슬레이브 마운트로 변경하여 호스트에 영향이 가지 않게 함
 	if err := unix.Mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
 		return err
 	}
 
-	// 이전 루트를 언마운트 (detach 방식)
 	if err := unix.Unmount(".", unix.MNT_DETACH); err != nil {
 		return err
 	}
 
-	// 최종적으로 new root로 이동
 	if err := unix.Chdir("/"); err != nil {
 		return &os.PathError{Op: "chdir", Path: "/", Err: err}
 	}
@@ -402,8 +307,6 @@ func pivotRootfs(newRootfs string) error {
 	return nil
 }
 
-// validateArgs 검증 함수는 CLI 인자 개수를 검증합니다.
-// checkType에 따라 정확한 개수, 최소 개수, 최대 개수를 확인합니다.
 func validateArgs(context *cli.Context, expectedCount, checkType int) error {
 	var err error
 	commandName := context.Command.Name
@@ -429,4 +332,32 @@ func validateArgs(context *cli.Context, expectedCount, checkType int) error {
 		return err
 	}
 	return nil
+}
+
+func writeCgroupFile(path string, content interface{}) error {
+	data := []byte(fmt.Sprintf("%v", content))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write to %s: %w", path, err)
+	}
+	return nil
+}
+
+func readJSONFile(filePath string, v interface{}) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return json.NewDecoder(file).Decode(v)
+}
+
+func writeJSONFile(filePath string, v interface{}) error {
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return json.NewEncoder(file).Encode(v)
 }
