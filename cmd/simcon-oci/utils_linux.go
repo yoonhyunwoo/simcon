@@ -114,6 +114,10 @@ func create(ctx *cli.Context) (int, error) {
 	return 1, nil
 }
 
+func state(ctx *cli.Context) (*specs.State, error) {
+
+}
+
 // forkProcess는 새로운 네임스페이스와 함께 init 프로세스를 시작합니다.
 func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	runtime.GOMAXPROCS(1)
