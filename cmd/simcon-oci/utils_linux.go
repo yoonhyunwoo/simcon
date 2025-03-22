@@ -22,55 +22,67 @@ const (
 	maxArgs
 )
 
-func checkArgs(context *cli.Context, expected, checkType int) error {
+// validateArgs 검증 함수는 CLI 인자 개수를 검증합니다.
+// checkType에 따라 정확한 개수, 최소 개수, 최대 개수를 확인합니다.
+func validateArgs(ctx *cli.Context, expectedCount, checkType int) error {
 	var err error
-	cmdName := context.Command.Name
+	commandName := ctx.Command.Name
+
 	switch checkType {
 	case exactArgs:
-		if context.NArg() != expected {
-			err = fmt.Errorf("%s: %q requires exactly %d argument(s)", os.Args[0], cmdName, expected)
+		if ctx.NArg() != expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 정확히 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
 		}
 	case minArgs:
-		if context.NArg() < expected {
-			err = fmt.Errorf("%s: %q requires a minimum of %d argument(s)", os.Args[0], cmdName, expected)
+		if ctx.NArg() < expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 최소 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
 		}
 	case maxArgs:
-		if context.NArg() > expected {
-			err = fmt.Errorf("%s: %q requires a maximum of %d argument(s)", os.Args[0], cmdName, expected)
+		if ctx.NArg() > expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 최대 %d개의 인자를 허용합니다.", os.Args[0], commandName, expectedCount)
 		}
 	}
 
 	if err != nil {
-		fmt.Printf("Incorrect Usage.\n\n")
-		_ = cli.ShowCommandHelp(context, cmdName)
+		fmt.Println("Incorrect Usage.\n")
+		_ = cli.ShowCommandHelp(ctx, commandName)
 		return err
 	}
 	return nil
 }
 
-func createContainer(context *cli.Context) (int, error) {
-	containerID := context.Args().First()
-	bundlePath := context.Args().Get(1)
+// create는 새로운 컨테이너를 생성하고 초기 상태를 저장합니다.
+func create(ctx *cli.Context) (int, error) {
+	containerID := ctx.Args().First()
+	bundlePath := ctx.Args().Get(1)
 	configPath := filepath.Join(bundlePath, configFile)
+
+	// OCI 스펙 config 파일 로딩
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return -1, err
 	}
-	//rootfs := filepath.Join(bundlePath, config.Root.Path)
 
-	containerDir := filepath.Join(dataDir, containerID)
-	if err := os.MkdirAll(containerDir, 0755); err != nil {
+	// 컨테이너 메타데이터 저장 디렉토리 생성
+	containerMetadataDir := filepath.Join(dataDir, containerID)
+	if err := os.MkdirAll(containerMetadataDir, 0755); err != nil {
 		return -1, err
 	}
 
-	stateFile := filepath.Join(containerDir, "state.json")
-	_, err = os.Create(stateFile)
+	// 컨테이너 상태 파일 생성
+	stateFilePath := filepath.Join(containerMetadataDir, "state.json")
+	if _, err := os.Create(stateFilePath); err != nil {
+		return -1, err
+	}
+
+	// 컨테이너 프로세스 시작
+	pid, err := forkProcess(config, containerMetadataDir)
 	if err != nil {
 		return -1, err
 	}
 
-	pid, err := initContainerProcess(config, containerDir)
-	configByte, err := json.Marshal(config)
+	// 컨테이너 상태 저장
+	configBytes, err := json.Marshal(config)
 	if err != nil {
 		return -1, err
 	}
@@ -83,132 +95,109 @@ func createContainer(context *cli.Context) (int, error) {
 		Bundle:  bundlePath,
 		Annotations: map[string]string{
 			"created": time.Now().String(),
-			"config":  fmt.Sprintf("%s", string(configByte)),
+			"config":  string(configBytes),
 		},
 	}
 
-	sData, err := os.OpenFile(stateFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	stateFile, err := os.OpenFile(stateFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return -1, err
 	}
 
-	if err := json.NewEncoder(sData).Encode(containerState); err != nil {
+	if err := json.NewEncoder(stateFile).Encode(containerState); err != nil {
 		return -1, err
 	}
 
-	//cgroups 설정
+	// TODO: cgroups 설정
+	// TODO: 네트워크 설정
 
-	// Networks 설정
 	return 1, nil
-
 }
 
-func initContainerProcess(config *specs.Spec, containerDir string) (int, error) {
+// forkProcess는 새로운 네임스페이스와 함께 init 프로세스를 시작합니다.
+func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	runtime.GOMAXPROCS(1)
-	// 쓰레드 잠금
 	runtime.LockOSThread()
 
-	cmd := exec.Command("/proc/self/exe", "init", containerDir)
+	cmd := exec.Command("/proc/self/exe", "init", containerMetadataDir)
 
-	// main process stdio setup
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// hostname namespace
-		Cloneflags: syscall.CLONE_NEWUTS |
-			// new pic namespace
-			syscall.CLONE_NEWPID |
-			// new mount namespace
-			syscall.CLONE_NEWNS |
-			// new network namespace
-			syscall.CLONE_NEWNET,
+		Cloneflags: syscall.CLONE_NEWUTS | // Hostname namespace
+			syscall.CLONE_NEWPID | // PID namespace
+			syscall.CLONE_NEWNS | // Mount namespace
+			syscall.CLONE_NEWNET, // Network namespace
 	}
 
-	// 실행
 	if err := cmd.Start(); err != nil {
-		fmt.Printf("Error starting init process: %v\n", err)
+		fmt.Printf("init 프로세스 시작 실패: %v\n", err)
 		return -1, err
 	}
 
 	pid := cmd.Process.Pid
 
-	// Network 설정
+	// TODO: 네트워크 초기화
+	// TODO: overlayFS 초기화
+	// TODO: pivot_root 처리
 
-	// overlayFS 설정
-
-	// pivot_root 설정
-
+	// 부모 프로세스가 기다리도록 SIGSTOP 전송
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
-		fmt.Printf("Failed to send SIGSTOP signal: %v\n", err)
+		fmt.Printf("SIGSTOP 전송 실패: %v\n", err)
 		return -1, err
 	}
 
 	return pid, nil
 }
 
-func containerInitProcess(context *cli.Context) error {
-	fmt.Println("conmtainer init process..")
+// containerInit는 init 프로세스에서 실행됩니다.
+func containerInit(ctx *cli.Context) error {
+	fmt.Println("컨테이너 init 프로세스 실행 중...")
 	return nil
 }
 
-// pivotRoot will call pivot_root such that rootfs becomes the new root
-// filesystem, and everything else is cleaned up.
-func pivotRoot(rootfs string) error {
-	// While the documentation may claim otherwise, pivot_root(".", ".") is
-	// actually valid. What this results in is / being the new root but
-	// /proc/self/cwd being the old root. Since we can play around with the cwd
-	// with pivot_root this allows us to pivot without creating directories in
-	// the rootfs. Shout-outs to the LXC developers for giving us this idea.
-
-	oldroot, err := unix.Open("/", unix.O_DIRECTORY|unix.O_RDONLY, 0)
+// pivotRoot는 현재 프로세스의 root filesystem을 변경합니다.
+func pivotRootfs(newRootfs string) error {
+	oldRootFD, err := unix.Open("/", unix.O_DIRECTORY|unix.O_RDONLY, 0)
 	if err != nil {
 		return &os.PathError{Op: "open", Path: "/", Err: err}
 	}
-	defer unix.Close(oldroot) //nolint: errcheck
+	defer unix.Close(oldRootFD)
 
-	newroot, err := unix.Open(rootfs, unix.O_DIRECTORY|unix.O_RDONLY, 0)
+	newRootFD, err := unix.Open(newRootfs, unix.O_DIRECTORY|unix.O_RDONLY, 0)
 	if err != nil {
-		return &os.PathError{Op: "open", Path: rootfs, Err: err}
+		return &os.PathError{Op: "open", Path: newRootfs, Err: err}
 	}
-	defer unix.Close(newroot) //nolint: errcheck
+	defer unix.Close(newRootFD)
 
-	// Change to the new root so that the pivot_root actually acts on it.
-	if err := unix.Fchdir(newroot); err != nil {
-		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(newroot), Err: err}
+	if err := unix.Fchdir(newRootFD); err != nil {
+		return &os.PathError{Op: "fchdir", Path: strconv.Itoa(newRootFD), Err: err}
 	}
 
 	if err := unix.PivotRoot(".", "."); err != nil {
 		return &os.PathError{Op: "pivot_root", Path: ".", Err: err}
 	}
 
-	// Currently our "." is oldroot (according to the current kernel code).
-	// However, purely for safety, we will fchdir(oldroot) since there isn't
-	// really any guarantee from the kernel what /proc/self/cwd will be after a
-	// pivot_root(2).
-
-	if err := unix.Fchdir(oldroot); err != nil {
-		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(oldroot), Err: err}
+	if err := unix.Fchdir(oldRootFD); err != nil {
+		return &os.PathError{Op: "fchdir", Path: strconv.Itoa(oldRootFD), Err: err}
 	}
 
-	// Make oldroot rslave to make sure our unmounts don't propagate to the
-	// host (and thus bork the machine). We don't use rprivate because this is
-	// known to cause issues due to races where we still have a reference to a
-	// mount while a process in the host namespace are trying to operate on
-	// something they think has no mounts (devicemapper in particular).
-
+	// 슬레이브 마운트로 변경하여 호스트에 영향이 가지 않게 함
 	if err := unix.Mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
 		return err
 	}
-	// Perform the unmount. MNT_DETACH allows us to unmount /proc/self/cwd.
+
+	// 이전 루트를 언마운트 (detach 방식)
 	if err := unix.Unmount(".", unix.MNT_DETACH); err != nil {
 		return err
 	}
 
-	// Switch back to our shiny new root.
+	// 최종적으로 new root로 이동
 	if err := unix.Chdir("/"); err != nil {
 		return &os.PathError{Op: "chdir", Path: "/", Err: err}
 	}
+
 	return nil
 }

@@ -15,7 +15,7 @@ var createCommand = &cli.Command{
 			return err
 		}
 
-		status, err := createContainer(context)
+		status, err := create(context)
 		if err != nil {
 			return err
 		}
