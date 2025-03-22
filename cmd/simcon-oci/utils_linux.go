@@ -22,39 +22,10 @@ const (
 	maxArgs
 )
 
-// validateArgs 검증 함수는 CLI 인자 개수를 검증합니다.
-// checkType에 따라 정확한 개수, 최소 개수, 최대 개수를 확인합니다.
-func validateArgs(ctx *cli.Context, expectedCount, checkType int) error {
-	var err error
-	commandName := ctx.Command.Name
-
-	switch checkType {
-	case exactArgs:
-		if ctx.NArg() != expectedCount {
-			err = fmt.Errorf("%s: %q 명령은 정확히 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
-		}
-	case minArgs:
-		if ctx.NArg() < expectedCount {
-			err = fmt.Errorf("%s: %q 명령은 최소 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
-		}
-	case maxArgs:
-		if ctx.NArg() > expectedCount {
-			err = fmt.Errorf("%s: %q 명령은 최대 %d개의 인자를 허용합니다.", os.Args[0], commandName, expectedCount)
-		}
-	}
-
-	if err != nil {
-		fmt.Println("Incorrect Usage.\n")
-		_ = cli.ShowCommandHelp(ctx, commandName)
-		return err
-	}
-	return nil
-}
-
 // create는 새로운 컨테이너를 생성하고 초기 상태를 저장합니다.
-func create(ctx *cli.Context) (int, error) {
-	containerID := ctx.Args().First()
-	bundlePath := ctx.Args().Get(1)
+func create(context *cli.Context) (int, error) {
+	containerID := context.Args().First()
+	bundlePath := context.Args().Get(1)
 	configPath := filepath.Join(bundlePath, configFile)
 
 	// OCI 스펙 config 파일 로딩
@@ -70,7 +41,7 @@ func create(ctx *cli.Context) (int, error) {
 	}
 
 	// 컨테이너 상태 파일 생성
-	stateFilePath := filepath.Join(containerMetadataDir, "state.json")
+	stateFilePath := filepath.Join(containerMetadataDir, stateFile)
 	if _, err := os.Create(stateFilePath); err != nil {
 		return -1, err
 	}
@@ -99,6 +70,11 @@ func create(ctx *cli.Context) (int, error) {
 		},
 	}
 
+	if err := setupCgroups(containerState, config); err != nil {
+		return -1, err
+	}
+	// TODO: 네트워크 설정
+
 	stateFile, err := os.OpenFile(stateFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return -1, err
@@ -108,14 +84,24 @@ func create(ctx *cli.Context) (int, error) {
 		return -1, err
 	}
 
-	// TODO: cgroups 설정
-	// TODO: 네트워크 설정
-
 	return 1, nil
 }
 
-func state(ctx *cli.Context) (*specs.State, error) {
+func state(context *cli.Context) (specs.State, error) {
+	containerID := context.Args().First()
+	containerMetadataDir := filepath.Join(dataDir, containerID)
+	stateFilePath := filepath.Join(containerMetadataDir, stateFile)
+	containerState := specs.State{}
 
+	sData, err := os.Open(stateFilePath)
+	if err != nil {
+		return containerState, err
+	}
+	defer sData.Close()
+
+	json.NewDecoder(sData).Decode(&containerState)
+
+	return containerState, nil
 }
 
 // forkProcess는 새로운 네임스페이스와 함께 init 프로세스를 시작합니다.
@@ -157,8 +143,218 @@ func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 }
 
 // containerInit는 init 프로세스에서 실행됩니다.
-func containerInit(ctx *cli.Context) error {
+func containerInit(context *cli.Context) error {
 	fmt.Println("컨테이너 init 프로세스 실행 중...")
+	return nil
+}
+
+func setupCgroups(state specs.State, config specs.Spec) error {
+	// cgroup 기본 경로 설정 (상수로 정의되어 있다고 가정)
+	cgroupPath := filepath.Join(cgroupBasePath, state.ID)
+
+	// 디렉토리 생성
+	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
+		return fmt.Errorf("failed to create cgroup directory: %w", err)
+	}
+
+	// 프로세스를 cgroup에 추가
+	if err := os.WriteFile(
+		filepath.Join(cgroupPath, "cgroup.procs"),
+		[]byte(fmt.Sprintf("%d", state.Pid)),
+		0644,
+	); err != nil {
+		return fmt.Errorf("failed to add process to cgroup: %w", err)
+	}
+
+	// 리소스 제한 설정 부분
+	if config.Linux != nil && config.Linux.Resources != nil {
+		// 1. 메모리 제한 설정
+		if config.Linux.Resources.Memory != nil {
+			// 메모리 제한
+			if config.Linux.Resources.Memory.Limit != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "memory.max"),
+					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Limit)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set memory limit: %w", err)
+				}
+			}
+
+			// 메모리 예약(reservation)
+			if config.Linux.Resources.Memory.Reservation != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "memory.low"),
+					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Reservation)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set memory reservation: %w", err)
+				}
+			}
+
+			// 스왑 제한
+			if config.Linux.Resources.Memory.Swap != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "memory.swap.max"),
+					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Memory.Swap)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set swap limit: %w", err)
+				}
+			}
+		}
+
+		// 2. CPU 제한 설정
+		if config.Linux.Resources.CPU != nil {
+			// CPU 쿼터(quota)
+			if config.Linux.Resources.CPU.Quota != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpu.max"),
+					[]byte(fmt.Sprintf("%d max", *config.Linux.Resources.CPU.Quota)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set CPU quota: %w", err)
+				}
+			}
+
+			// CPU 주기(period)
+			if config.Linux.Resources.CPU.Period != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpu.max"),
+					[]byte(fmt.Sprintf("max %d", *config.Linux.Resources.CPU.Period)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set CPU period: %w", err)
+				}
+			}
+
+			// CPU 쿼터 + 주기를 함께 설정
+			if config.Linux.Resources.CPU.Quota != nil && config.Linux.Resources.CPU.Period != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpu.max"),
+					[]byte(fmt.Sprintf("%d %d", *config.Linux.Resources.CPU.Quota, *config.Linux.Resources.CPU.Period)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set CPU quota and period: %w", err)
+				}
+			}
+
+			// CPU 가중치(weight)
+			if config.Linux.Resources.CPU.Shares != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpu.weight"),
+					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.CPU.Shares)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set CPU weight: %w", err)
+				}
+			}
+
+			// CPU 셋(cpuset) - 특정 CPU에 할당
+			if config.Linux.Resources.CPU.Cpus != "" {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpuset.cpus"),
+					[]byte(config.Linux.Resources.CPU.Cpus),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set CPU set: %w", err)
+				}
+			}
+
+			// 메모리 노드 설정(NUMA)
+			if config.Linux.Resources.CPU.Mems != "" {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "cpuset.mems"),
+					[]byte(config.Linux.Resources.CPU.Mems),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set memory nodes: %w", err)
+				}
+			}
+		}
+
+		// 3. 프로세스 수 제한
+		if config.Linux.Resources.Pids != nil {
+			if err := os.WriteFile(
+				filepath.Join(cgroupPath, "pids.max"),
+				[]byte(fmt.Sprintf("%d", config.Linux.Resources.Pids.Limit)),
+				0644,
+			); err != nil {
+				return fmt.Errorf("failed to set pids limit: %w", err)
+			}
+		}
+
+		// 4. 블록 I/O 제한
+		if config.Linux.Resources.BlockIO != nil {
+			// 가중치 설정
+			if config.Linux.Resources.BlockIO.Weight != nil {
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "io.weight"),
+					[]byte(fmt.Sprintf("%d", *config.Linux.Resources.BlockIO.Weight)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set I/O weight: %w", err)
+				}
+			}
+
+			// 장치별 스로틀링 설정
+			for _, device := range config.Linux.Resources.BlockIO.ThrottleReadBpsDevice {
+				deviceStr := fmt.Sprintf("%d:%d", device.Major, device.Minor)
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "io.max"),
+					[]byte(fmt.Sprintf("%s rbps=%d", deviceStr, device.Rate)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set read BPS throttle: %w", err)
+				}
+			}
+
+			for _, device := range config.Linux.Resources.BlockIO.ThrottleWriteBpsDevice {
+				deviceStr := fmt.Sprintf("%d:%d", device.Major, device.Minor)
+				if err := os.WriteFile(
+					filepath.Join(cgroupPath, "io.max"),
+					[]byte(fmt.Sprintf("%s wbps=%d", deviceStr, device.Rate)),
+					0644,
+				); err != nil {
+					return fmt.Errorf("failed to set write BPS throttle: %w", err)
+				}
+			}
+		}
+
+		// 5. 허거 페이지(Huge Page) 제한
+		for _, limit := range config.Linux.Resources.HugepageLimits {
+			if err := os.WriteFile(
+				filepath.Join(cgroupPath, fmt.Sprintf("hugetlb.%s.max", limit.Pagesize)),
+				[]byte(fmt.Sprintf("%d", limit.Limit)),
+				0644,
+			); err != nil {
+				return fmt.Errorf("failed to set hugepage limit for %s: %w", limit.Pagesize, err)
+			}
+		}
+
+		// 6. 네트워크 우선순위 설정
+		if config.Linux.Resources.Network != nil && config.Linux.Resources.Network.ClassID != nil {
+			if err := os.WriteFile(
+				filepath.Join(cgroupPath, "net_cls.classid"),
+				[]byte(fmt.Sprintf("%d", *config.Linux.Resources.Network.ClassID)),
+				0644,
+			); err != nil {
+				return fmt.Errorf("failed to set network class ID: %w", err)
+			}
+		}
+
+		// 7. Unified cgroup 설정 (cgroup v2 전용)
+		for key, value := range config.Linux.Resources.Unified {
+			if err := os.WriteFile(
+				filepath.Join(cgroupPath, key),
+				[]byte(value),
+				0644,
+			); err != nil {
+				return fmt.Errorf("failed to set unified cgroup parameter %s: %w", key, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -203,5 +399,34 @@ func pivotRootfs(newRootfs string) error {
 		return &os.PathError{Op: "chdir", Path: "/", Err: err}
 	}
 
+	return nil
+}
+
+// validateArgs 검증 함수는 CLI 인자 개수를 검증합니다.
+// checkType에 따라 정확한 개수, 최소 개수, 최대 개수를 확인합니다.
+func validateArgs(context *cli.Context, expectedCount, checkType int) error {
+	var err error
+	commandName := context.Command.Name
+
+	switch checkType {
+	case exactArgs:
+		if context.NArg() != expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 정확히 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
+		}
+	case minArgs:
+		if context.NArg() < expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 최소 %d개의 인자가 필요합니다.", os.Args[0], commandName, expectedCount)
+		}
+	case maxArgs:
+		if context.NArg() > expectedCount {
+			err = fmt.Errorf("%s: %q 명령은 최대 %d개의 인자를 허용합니다.", os.Args[0], commandName, expectedCount)
+		}
+	}
+
+	if err != nil {
+		fmt.Println("Incorrect Usage.\n")
+		_ = cli.ShowCommandHelp(context, commandName)
+		return err
+	}
 	return nil
 }

@@ -7,9 +7,11 @@ import (
 )
 
 const (
-	configFile = "config.json"
-	dataDir    = "/var/lib/simcon-oci"
-	ociVersion = "1.0.0"
+	configFile     = "config.json"
+	dataDir        = "/var/lib/simcon-oci"
+	ociVersion     = "1.0.0"
+	stateFile      = "state.json"
+	cgroupBasePath = "/sys/fs/cgroup"
 )
 
 func main() {
