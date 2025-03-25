@@ -74,11 +74,6 @@ func create(context *cli.Context) (int, error) {
 		return -1, err
 	}
 
-	// TODO: 네트워크 설정
-	// if err := setupNetwork(containerState, config); err != nil {
-	//     return -1, err
-	// }
-
 	if err := writeJSONFile(stateFilePath, containerState); err != nil {
 		return -1, err
 	}
@@ -110,10 +105,13 @@ func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	cmd.Stderr = os.Stderr
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID |
+		Cloneflags: syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWUTS |
+			syscall.CLONE_NEWIPC |
+			syscall.CLONE_NEWNET |
 			syscall.CLONE_NEWNS |
-			syscall.CLONE_NEWNET,
+			syscall.CLONE_NEWUSER |
+			syscall.CLONE_NEWCGROUP,
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -122,10 +120,6 @@ func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
 	}
 
 	pid := cmd.Process.Pid
-
-	// TODO: 네트워크 초기화
-	// TODO: overlayFS 초기화
-	// TODO: pivot_root 처리
 
 	if err := cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		fmt.Printf("SIGSTOP 전송 실패: %v\n", err)

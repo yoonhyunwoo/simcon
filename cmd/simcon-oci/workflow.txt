@@ -1,0 +1,39 @@
+[create process]
+├─ load config.json
+├─ fork bootstrap process
+├─ setup cgroups
+└─ record container state
+
+        ↓
+
+[bootstrap process] (runc init)
+├─ load config again
+├─ setup namespaces
+├─ setup rootfs (pivot_root)
+├─ drop capabilities
+├─ set UID/GID
+├─ setup env, cwd
+├─ setup network
+└─ exec → init process
+
+        ↓
+
+[init process] (user program)
+└─ runs as PID 1 inside container
+
+
+
+📝 각 TODO 항목과 수행 위치
+TODO 항목	수행 위치	이유/설명
+1. config.json 로드	✅ create process
+✅ bootstrap process	create에서는 초기 정보로 사용
+bootstrap에서는 내부 세팅을 위해 다시 로드
+2. 파일 디스크립터 정리 (close-on-exec)	✅ bootstrap process	부모로부터 전달된 FD 외에 불필요한 것 정리해야 보안 및 리소스 보호
+3. 네트워크 인터페이스 설정	✅ bootstrap process	네임스페이스가 분리된 후 내부에서 인터페이스 할당 필요
+4. 루트 파일 시스템 마운트 및 pivot_root	✅ bootstrap process	컨테이너 내부에서 실제 루트 변경은 이 시점에 해야 함
+5. UID/GID 전환	✅ bootstrap process	권한 격리는 네임스페이스 진입 후, 애플리케이션 실행 전에 해야 함
+6. 작업 디렉토리 변경	✅ bootstrap process	chdir은 권한이 바뀐 후, 올바른 경로로 설정하기 위해 사용됨
+7. capabilities 설정	✅ bootstrap process	Drop/Set capabilities는 init 실행 전 보안 목적
+8. 환경 변수 설정	✅ bootstrap process	실행할 프로세스의 환경 세팅은 이 시점에 해야 정확
+9. 최종 exec (execve)	✅ bootstrap process → init process로 진입	이 exec 이후부터는 실제 애플리케이션이 동작 (init process)
+10. panic/recover 처리	✅ bootstrap process	Go 초기화 중 실패를 대비해 예외 안전 장치 필요

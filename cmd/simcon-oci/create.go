@@ -11,7 +11,7 @@ var createCommand = &cli.Command{
 	ArgsUsage: "<container-id> <path-to-bundle>",
 	Action: func(context *cli.Context) error {
 
-		if err := checkArgs(context, 2, exactArgs); err != nil {
+		if err := validateArgs(context, 2, exactArgs); err != nil {
 			return err
 		}
 
