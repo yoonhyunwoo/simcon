@@ -1,8 +1,10 @@
 package container
 
 import (
+	"path/filepath"
 	"syscall"
 
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 )
 
@@ -18,4 +20,17 @@ func readonlyPath(path string) error {
 		return err
 	}
 	return nil
+}
+
+//TODO : Process resources
+func resources(spec specs.Spec) error {
+	cgroupPath := spec.Linux.CgroupsPath
+	// set device
+	devicesfile := filepath.Join(cgroupPath, "cgroup.devices.allow")
+	for _, resource := range spec.Linux.Resources.Devices {
+		if !resource.Allow {
+			continue
+		}
+		if resource.
+	}
 }
