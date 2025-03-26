@@ -1,9 +1,10 @@
 package main
 
 import (
-	"github.com/urfave/cli/v2"
 	"log"
 	"os"
+
+	"github.com/urfave/cli/v2"
 )
 
 const (
@@ -29,6 +30,7 @@ func main() {
 		startCommand,
 		killCommand,
 		deleteCommand,
+		specCommand,
 	}
 
 	if err := app.Run(os.Args); err != nil {

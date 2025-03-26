@@ -6,7 +6,7 @@ import "github.com/urfave/cli/v2"
 var initCommand = cli.Command{
 	Name: "init",
 	Action: func(context *cli.Context) error {
-		if err := containerInitProcess(context); err != nil {
+		if err := containerInit(context); err != nil {
 			return err
 		}
 		return nil

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +48,7 @@ func create(context *cli.Context) (int, error) {
 	}
 
 	// 컨테이너 프로세스 시작
-	pid, err := forkProcess(config, containerMetadataDir)
+	pid, err := forkProcess(config)
 	if err != nil {
 		return -1, err
 	}
@@ -94,11 +95,11 @@ func state(context *cli.Context) (specs.State, error) {
 }
 
 // forkProcess는 새로운 네임스페이스와 함께 init 프로세스를 시작합니다.
-func forkProcess(config *specs.Spec, containerMetadataDir string) (int, error) {
+func forkProcess(config *specs.Spec) (int, error) {
 	runtime.GOMAXPROCS(1)
 	runtime.LockOSThread()
 
-	cmd := exec.Command("/proc/self/exe", "init", containerMetadataDir)
+	cmd := exec.Command("/proc/self/exe", "init")
 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -354,4 +355,136 @@ func writeJSONFile(filePath string, v interface{}) error {
 	defer file.Close()
 
 	return json.NewEncoder(file).Encode(v)
+}
+
+func defaultSpec() {
+	spec := specs.Spec{
+		Version: ociVersion,
+		Process: &specs.Process{
+			Terminal: true,
+			User: specs.User{
+				UID: 0,
+				GID: 0,
+			},
+			Args: []string{"sh"},
+			Env: []string{
+				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+				"TERM=xterm",
+			},
+			Cwd: "/",
+			Capabilities: &specs.LinuxCapabilities{
+				Bounding: []string{
+					"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE",
+				},
+				Effective: []string{
+					"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE",
+				},
+				Permitted: []string{
+					"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE",
+				},
+				Ambient: []string{
+					"CAP_AUDIT_WRITE", "CAP_KILL", "CAP_NET_BIND_SERVICE",
+				},
+			},
+			Rlimits: []specs.POSIXRlimit{
+				{
+					Type: "RLIMIT_NOFILE",
+					Soft: 1024,
+					Hard: 1024,
+				},
+			},
+			NoNewPrivileges: true,
+		},
+		Root: &specs.Root{
+			Path:     "rootfs",
+			Readonly: true,
+		},
+		Hostname: "runc",
+		Mounts: []specs.Mount{
+			{
+				Destination: "/proc",
+				Type:        "proc",
+				Source:      "proc",
+			},
+			{
+				Destination: "/dev",
+				Type:        "tmpfs",
+				Source:      "tmpfs",
+				Options:     []string{"nosuid", "strictatime", "mode=755", "size=65536k"},
+			},
+			{
+				Destination: "/dev/pts",
+				Type:        "devpts",
+				Source:      "devpts",
+				Options:     []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"},
+			},
+			{
+				Destination: "/dev/shm",
+				Type:        "tmpfs",
+				Source:      "shm",
+				Options:     []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"},
+			},
+			{
+				Destination: "/dev/mqueue",
+				Type:        "mqueue",
+				Source:      "mqueue",
+				Options:     []string{"nosuid", "noexec", "nodev"},
+			},
+			{
+				Destination: "/sys",
+				Type:        "sysfs",
+				Source:      "sysfs",
+				Options:     []string{"nosuid", "noexec", "nodev", "ro"},
+			},
+			{
+				Destination: "/sys/fs/cgroup",
+				Type:        "cgroup",
+				Source:      "cgroup",
+				Options:     []string{"nosuid", "noexec", "nodev", "relatime", "ro"},
+			},
+		},
+		Linux: &specs.Linux{
+			Resources: &specs.LinuxResources{
+				Devices: []specs.LinuxDeviceCgroup{
+					{
+						Allow:  false,
+						Access: "rwm",
+					},
+				},
+			},
+			Namespaces: []specs.LinuxNamespace{
+				{Type: specs.PIDNamespace},
+				{Type: specs.NetworkNamespace},
+				{Type: specs.IPCNamespace},
+				{Type: specs.UTSNamespace},
+				{Type: specs.MountNamespace},
+				{Type: specs.CgroupNamespace},
+			},
+			MaskedPaths: []string{
+				"/proc/acpi",
+				"/proc/asound",
+				"/proc/kcore",
+				"/proc/keys",
+				"/proc/latency_stats",
+				"/proc/timer_list",
+				"/proc/timer_stats",
+				"/proc/sched_debug",
+				"/sys/firmware",
+				"/proc/scsi",
+			},
+			ReadonlyPaths: []string{
+				"/proc/bus",
+				"/proc/fs",
+				"/proc/irq",
+				"/proc/sys",
+				"/proc/sysrq-trigger",
+			},
+		},
+	}
+
+	config, err := os.Create("config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+	json.NewEncoder(config).Encode(spec)
 }
