@@ -1,6 +1,8 @@
 package container
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -8,9 +10,14 @@ import (
 )
 
 func Mount(spec *specs.Spec) error {
+	rootfs := spec.Root.Path
 	for _, mount := range spec.Mounts {
+		target := filepath.Join(rootfs, mount.Destination)
+		if err := os.MkdirAll(target, 0755); err != nil {
+			return err
+		}
 		options, data := parseMountOptions(mount.Options)
-		err := unix.Mount(mount.Source, mount.Destination, mount.Type, options, data)
+		err := unix.Mount(mount.Source, target, mount.Type, options, data)
 		if err != nil {
 			return err
 		}
