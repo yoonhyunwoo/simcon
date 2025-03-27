@@ -1,4 +1,4 @@
-package container
+package runtime
 
 import (
 	"fmt"
@@ -87,7 +87,7 @@ func setResources(spec *specs.Spec) error {
 				return err
 			}
 		}
-		// 생략: device 별 블록 IO 제한 처리 (추가 구현 가능)
+		// TODO: device 별 블록 IO 제한 처리 (추가 구현 가능)
 	}
 
 	// Hugepages
