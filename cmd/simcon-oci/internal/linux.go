@@ -1,6 +1,8 @@
 package container
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 
@@ -22,15 +24,52 @@ func readonlyPath(path string) error {
 	return nil
 }
 
-//TODO : Process resources
-func resources(spec specs.Spec) error {
+// TODO : Process resources
+func resources(spec *specs.Spec) error {
 	cgroupPath := spec.Linux.CgroupsPath
 	// set device
-	devicesfile := filepath.Join(cgroupPath, "cgroup.devices.allow")
+	devicefile := filepath.Join(cgroupPath, "cgroup.devices.allow")
+	devicesCgroup, err := os.Create(devicefile)
+	if err != nil {
+		return err
+	}
+	defer devicesCgroup.Close()
+
 	for _, resource := range spec.Linux.Resources.Devices {
 		if !resource.Allow {
 			continue
 		}
-		if resource.
+		row := fmt.Sprintf("%s %d:%d %s", resource.Type, resource.Major, resource.Minor, resource.Access)
+		_, err = devicesCgroup.WriteString(row)
+		if err != nil {
+			return err
+		}
 	}
+
+	return nil
+}
+
+func setNamespaces(namespaces []specs.LinuxNamespace) uintptr {
+	var cloneFlags uintptr
+	for _, namespace := range namespaces {
+		switch namespace.Type {
+		case specs.PIDNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWPID
+		case specs.UTSNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWUTS
+		case specs.IPCNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWIPC
+		case specs.NetworkNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWNET
+		case specs.MountNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWNS
+		case specs.CgroupNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWCGROUP
+		case specs.TimeNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWTIME
+		case specs.UserNamespace:
+			cloneFlags = cloneFlags | syscall.CLONE_NEWUSER
+		}
+	}
+	return cloneFlags
 }
